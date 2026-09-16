@@ -53,9 +53,13 @@ module tt_um_sine_area_detector #(
     wire [26:0] prescale_terminal_extended;
     wire        sample_tick;
 
-    assign prescale_terminal_extended =
-        (divider_exponent_latched == 5'd23) ? 27'd78124999 :
-        (27'd1 << divider_exponent_latched) - 27'd1;
+    /* Decode once on the configuration edge; preserve the first sample. */
+    reg [26:0] prescale_terminal_latched;
+    wire [26:0] config_terminal;
+    assign config_terminal =
+        (divider_exponent == 5'd23) ? 27'd78124999 :
+        (27'd1 << divider_exponent) - 27'd1;
+    assign prescale_terminal_extended = prescale_terminal_latched;
     assign sample_tick =
         (prescale_count == prescale_terminal_extended);
 
@@ -106,49 +110,73 @@ module tt_um_sine_area_detector #(
     assign take_sample = config_latched_valid && sample_tick;
     assign peak_buffer_next = adc_magnitude;
 
+    /* Compare original candidates in parallel, before selecting a source. */
+    wire first_alive;
+    wire second_alive;
+    wire buffer_diff_first;
+    wire buffer_diff_second;
+    wire new_ge_first;
+    wire new_ge_second;
+    wire new_ge_buffer;
+    wire fill_second;
+    wire choose_new_first;
+    wire choose_new_second;
+    wire first_from_first;
+    wire first_from_second;
+    wire second_from_first;
+    wire second_from_second;
+    wire second_from_buffer;
+
+    assign first_alive = peak_first_valid &&
+        (peak_first_position != history_pointer[9:0]);
+    assign second_alive = peak_second_valid &&
+        (peak_second_position != history_pointer[9:0]);
+    assign buffer_diff_first = peak_buffer_position != peak_first_position;
+    assign buffer_diff_second = peak_buffer_position != peak_second_position;
+    assign new_ge_first = peak_buffer_next >= peak_first;
+    assign new_ge_second = peak_buffer_next >= peak_second;
+    assign new_ge_buffer = peak_buffer_next >= peak_buffer;
+
+    /* Refill only an empty second slot, without duplicating the survivor. */
+    assign fill_second = !(first_alive && second_alive) && peak_buffer_valid &&
+        ((first_alive && buffer_diff_first) ||
+         (!first_alive && (!second_alive || buffer_diff_second)));
+    /* Newer equal samples retain the original priority. */
+    assign choose_new_first = !(first_alive || second_alive) ||
+        (first_alive && new_ge_first) ||
+        (!first_alive && second_alive && new_ge_second);
+    assign choose_new_second = !choose_new_first &&
+        (!((first_alive && second_alive) || fill_second) ||
+         (fill_second && new_ge_buffer) ||
+         (!fill_second && new_ge_second));
+
+    /* Mutually exclusive selectors keep values and positions paired. */
+    assign first_from_first = !choose_new_first && first_alive;
+    assign first_from_second = !choose_new_first && !first_alive;
+    assign second_from_first = choose_new_first && first_alive;
+    assign second_from_second = (choose_new_first && !first_alive) ||
+        (!choose_new_first && !choose_new_second && !fill_second);
+    assign second_from_buffer = !choose_new_first && !choose_new_second && fill_second;
+
     always @* begin
-        peak_first_next = peak_first;
-        peak_second_next = peak_second;
-        peak_first_position_next = peak_first_position;
-        peak_second_position_next = peak_second_position;
+        peak_first_next = ({8{choose_new_first}} & peak_buffer_next) |
+            ({8{first_from_first}} & peak_first) |
+            ({8{first_from_second}} & peak_second);
+        peak_first_position_next = ({10{choose_new_first}} & history_pointer[9:0]) |
+            ({10{first_from_first}} & peak_first_position) |
+            ({10{first_from_second}} & peak_second_position);
+        peak_first_valid_next = 1'b1;
 
-        /* Expire samples after 1024 sampling steps. */
-        peak_first_valid_next = peak_first_valid &&
-            (peak_first_position != history_pointer[9:0]);
-        peak_second_valid_next = peak_second_valid &&
-            (peak_second_position != history_pointer[9:0]);
-
-        /* Promote second without changing its age. */
-        if (!peak_first_valid_next) begin
-            peak_first_next = peak_second_next;
-            peak_first_position_next = peak_second_position_next;
-            peak_first_valid_next = peak_second_valid_next;
-            peak_second_valid_next = 1'b0;
-        end
-
-        /* Buffer is one sample old and has already competed with both peaks. */
-        /* Fill second without duplicating the surviving first sample. */
-        if (!peak_second_valid_next && peak_buffer_valid &&
-            (!peak_first_valid_next ||
-             (peak_buffer_position != peak_first_position_next))) begin
-            peak_second_next = peak_buffer;
-            peak_second_position_next = peak_buffer_position;
-            peak_second_valid_next = 1'b1;
-        end
-
-        /* Compare the incoming sample; newer ties win. */
-        if (!peak_first_valid_next || (peak_buffer_next >= peak_first_next)) begin
-            peak_second_next = peak_first_next;
-            peak_second_position_next = peak_first_position_next;
-            peak_second_valid_next = peak_first_valid_next;
-            peak_first_next = peak_buffer_next;
-            peak_first_position_next = history_pointer[9:0];
-            peak_first_valid_next = 1'b1;
-        end else if (!peak_second_valid_next || (peak_buffer_next >= peak_second_next)) begin
-            peak_second_next = peak_buffer_next;
-            peak_second_position_next = history_pointer[9:0];
-            peak_second_valid_next = 1'b1;
-        end
+        peak_second_next = ({8{choose_new_second}} & peak_buffer_next) |
+            ({8{second_from_first}} & peak_first) |
+            ({8{second_from_second}} & peak_second) |
+            ({8{second_from_buffer}} & peak_buffer);
+        peak_second_position_next = ({10{choose_new_second}} & history_pointer[9:0]) |
+            ({10{second_from_first}} & peak_first_position) |
+            ({10{second_from_second}} & peak_second_position) |
+            ({10{second_from_buffer}} & peak_buffer_position);
+        peak_second_valid_next = choose_new_first ? (first_alive || second_alive) :
+            ((first_alive && second_alive) || fill_second || choose_new_second);
     end
     assign peak_next = peak_first_next;
 
@@ -177,6 +205,7 @@ module tt_um_sine_area_detector #(
             config_latched_valid     <= 1'b0;
             divider_exponent_latched <= 5'd0;
             prescale_count           <= 27'd0;
+            prescale_terminal_latched <= 27'd0;
             history_pointer          <= 11'd0;
             running_sum              <= 12'd0;
             window_full              <= 1'b0;
@@ -200,6 +229,7 @@ module tt_um_sine_area_detector #(
             /* Hold reset state until a valid level is latched. */
             if (!config_latched_valid && config_valid) begin
                 divider_exponent_latched <= divider_exponent;
+                prescale_terminal_latched <= config_terminal;
                 config_latched_valid <= 1'b1;
             end
 
