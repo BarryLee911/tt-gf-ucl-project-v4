@@ -60,7 +60,7 @@ module tt_um_sine_area_detector #(
         (prescale_count == prescale_terminal_extended);
 
     /* Count ones in the last 2048 overlap samples. */
-    reg        overlap_history [0:2047];
+    reg [2047:0] overlap_history;
     reg [10:0] history_pointer;
     reg [11:0] running_sum;
     reg        window_full;
@@ -71,7 +71,7 @@ module tt_um_sine_area_detector #(
     wire        effective_oldest_overlap;
     wire [11:0] slide_sum_next;
 
-    assign oldest_overlap = overlap_history[history_pointer];
+    assign oldest_overlap = overlap_history[2047];
     /* Unwritten history counts as zero. */
     assign effective_oldest_overlap = window_full ? oldest_overlap : 1'b0;
     assign slide_sum_next =
@@ -208,8 +208,8 @@ module tt_um_sine_area_detector #(
             end
 
             if (take_sample) begin
-                /* Replace the oldest sample, then advance the pointer. */
-                overlap_history[history_pointer] <= overlap_bit;
+                /* Shift once per sample; read the old tail on this edge. */
+                overlap_history <= {overlap_history[2046:0], overlap_bit};
                 history_pointer <= history_pointer + 11'd1;
                 if (history_pointer == 11'd2047)
                     window_full <= 1'b1;//check
