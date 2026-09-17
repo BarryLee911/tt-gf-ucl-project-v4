@@ -110,6 +110,22 @@ module tt_um_sine_area_detector #(
     assign take_sample = config_latched_valid && sample_tick;
     assign peak_buffer_next = adc_magnitude;
 
+    /* Reachable peak magnitudes are 0..128. Keep the upper bound 256. */
+    function adc_ge_peak;
+        input [7:0] adc_code;
+        input [7:0] candidate;
+        reg [8:0] adc_unsigned;
+        reg [8:0] upper_bound;
+        reg [8:0] lower_bound;
+        begin
+            adc_unsigned = {1'b0, adc_code};
+            upper_bound = 9'd128 + {1'b0, candidate};
+            lower_bound = 9'd128 - {1'b0, candidate};
+            adc_ge_peak = (adc_unsigned >= upper_bound) ||
+                          (adc_unsigned <= lower_bound);
+        end
+    endfunction
+
     /* Compare original candidates in parallel, before selecting a source. */
     wire first_alive;
     wire second_alive;
@@ -133,9 +149,9 @@ module tt_um_sine_area_detector #(
         (peak_second_position != history_pointer[9:0]);
     assign buffer_diff_first = peak_buffer_position != peak_first_position;
     assign buffer_diff_second = peak_buffer_position != peak_second_position;
-    assign new_ge_first = peak_buffer_next >= peak_first;
-    assign new_ge_second = peak_buffer_next >= peak_second;
-    assign new_ge_buffer = peak_buffer_next >= peak_buffer;
+    assign new_ge_first = adc_ge_peak(ui_in, peak_first);
+    assign new_ge_second = adc_ge_peak(ui_in, peak_second);
+    assign new_ge_buffer = adc_ge_peak(ui_in, peak_buffer);
 
     /* Refill only an empty second slot, without duplicating the survivor. */
     assign fill_second = !(first_alive && second_alive) && peak_buffer_valid &&
